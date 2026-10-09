@@ -849,6 +849,19 @@ void WeaselPanel::_Reposition(bool adj) {
   if (y < rcWorkArea.top)
     y = rcWorkArea.top;
   m_inputPos.bottom = y;
+  /*
+   * The window is asked to move to where it already sits on most updates:
+   * hosts that never position their IME UI (games, notably) hand over the same
+   * caret rect on every keystroke, and the clamping above is deterministic.
+   * Actually moving it costs a z-order change through the owning window's
+   * chain - around 10ms when that owner is a Chromium window - so skip the
+   * call when nothing would move. A monitor change always re-applies.
+   */
+  if (m_hasLastWindowPos && m_lastWindowPos.x == x && m_lastWindowPos.y == y &&
+      !m_redraw_by_monitor_change)
+    return;
+  m_lastWindowPos = {x, y};
+  m_hasLastWindowPos = true;
   SetWindowPos(m_hWnd, HWND_TOPMOST, x, y, 0, 0,
                SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
 }
@@ -899,6 +912,8 @@ void WeaselPanel::OnDestroy() {
   m_hoverIndex = -1;
   m_layout.reset();
   m_sticky = false;
+  m_lastWindowPos = {-1, -1};
+  m_hasLastWindowPos = false;
 }
 
 HRESULT WeaselPanel::OnScroll(UINT uMsg, WPARAM wParam, LPARAM lParam) {

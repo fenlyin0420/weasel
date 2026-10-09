@@ -16,13 +16,21 @@ class UIImpl {
       return;
     panel.Refresh();
   }
+  /*
+   * Every candidate update asks for the window to be shown again, and the
+   * answer is usually already on screen. Showing or hiding a topmost popup
+   * owned by a Chromium window (a game's embedded browser, Chrome, WebView2)
+   * costs tens of milliseconds, so keep the call for the transitions only.
+   * Create() leaves the window hidden with its device resources attached, so
+   * nothing is skipped on the way up.
+   */
   void Show() {
-    if (!panel.IsWindow())
+    if (!panel.IsWindow() || IsShown())
       return;
     panel.ShowWindow(SW_SHOWNA);
   }
   void Hide() {
-    if (!panel.IsWindow())
+    if (!panel.IsWindow() || !IsShown())
       return;
     panel.ShowWindow(SW_HIDE);
   }

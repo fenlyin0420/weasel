@@ -79,6 +79,11 @@ class WeaselPanel {
 
   RECT m_inputPos{0, 0, 0, 0};
   CPoint m_lastCursorPos = {-1, -1};
+  /* Last window position handed to SetWindowPos. Moving a topmost popup owned
+   * by a Chromium window is expensive there, and the position usually repeats
+   * on every keystroke, so only move when it actually changes. */
+  CPoint m_lastWindowPos{-1, -1};
+  bool m_hasLastWindowPos = false;
 
   Context& m_ctx;
   Context& m_octx;
