@@ -243,8 +243,9 @@ void WeaselTSF::_UninitCompartment() {
 
 HRESULT WeaselTSF::_HandleCompartment(REFGUID guidCompartment) {
   if (IsEqualGUID(guidCompartment, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)) {
+    const BOOL isOpen = _IsKeyboardOpen();
+
     if (_isToOpenClose) {
-      BOOL isOpen = _IsKeyboardOpen();
       // clear composition when close keyboard
       if (!isOpen && _pEditSessionContext) {
         m_client.ClearComposition();
@@ -253,26 +254,57 @@ HRESULT WeaselTSF::_HandleCompartment(REFGUID guidCompartment) {
       _EnableLanguageBar(isOpen);
       _UpdateLanguageBar(_status);
     } else {
-      _status.ascii_mode = !_status.ascii_mode;
-      _SetKeyboardOpen(true);
-      if (_pLangBarButton && _pLangBarButton->IsLangBarDisabled())
-        _EnableLanguageBar(true);
-      _HandleLangBarMenuSelect(_status.ascii_mode
-                                   ? ID_WEASELTRAY_ENABLE_ASCII
-                                   : ID_WEASELTRAY_DISABLE_ASCII);
-      if (_pEditSessionContext)
-        m_client.ClearComposition();
-      _UpdateLanguageBar(_status);
+      const DWORD now = GetTickCount();
+      const bool toggleAlreadyDone =
+          _dwSkipAsciiToggleTick != 0 && (now - _dwSkipAsciiToggleTick) < 200;
+      if (toggleAlreadyDone) {
+        /*
+         * This change is not a new user request: it belongs to a Ctrl+Space
+         * that has already been switched, either by librime through the user's
+         * key_binder binding or by our own write below. Toggling again would
+         * cancel that switch, which is what made one press flip the state twice
+         * in hosts such as the Explorer rename box. Adopt the current state
+         * instead of asking the server to change it again.
+         */
+        _RequestKeyboardOpen();
+        _SyncStatusFromServer();
+        _UpdateLanguageBar(_status);
+      } else {
+        _status.ascii_mode = !_status.ascii_mode;
+        _RequestKeyboardOpen();
+        if (_pLangBarButton && _pLangBarButton->IsLangBarDisabled())
+          _EnableLanguageBar(true);
+        _HandleLangBarMenuSelect(_status.ascii_mode
+                                     ? ID_WEASELTRAY_ENABLE_ASCII
+                                     : ID_WEASELTRAY_DISABLE_ASCII);
+        if (_pEditSessionContext)
+          m_client.ClearComposition();
+        _SyncStatusFromServer();
+        _UpdateLanguageBar(_status);
+      }
     }
   } else if (IsEqualGUID(guidCompartment,
                          GUID_COMPARTMENT_KEYBOARD_INPUTMODE_CONVERSION)) {
     BOOL isOpen = _IsKeyboardOpen();
     if (isOpen) {
-      weasel::ResponseParser parser(NULL, NULL, &_status, NULL,
-                                    &_cand->style());
-      bool ok = m_client.GetResponseData(std::ref(parser));
+      _SyncStatusFromServer();
       _UpdateLanguageBar(_status);
     }
   }
   return S_OK;
+}
+
+bool WeaselTSF::_SyncStatusFromServer() {
+  weasel::ResponseParser parser(NULL, NULL, &_status, NULL, &_cand->style());
+  return m_client.GetResponseData(std::ref(parser));
+}
+
+void WeaselTSF::_RequestKeyboardOpen() {
+  /*
+   * SetValue on this compartment is refused while its own change notification
+   * is being delivered, so defer the write to the key event path. Staying open
+   * only matters once the user types again, and ActivateEx already re-opens the
+   * keyboard on thread focus.
+   */
+  _fOpenKeyboardPending = TRUE;
 }

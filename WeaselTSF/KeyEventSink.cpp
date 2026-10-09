@@ -8,8 +8,21 @@ static weasel::KeyEvent prevKeyEvent;
 static BOOL prevfEaten = FALSE;
 static int keyCountToSimulate = 0;
 
+// Pure Ctrl+Space, press only: the combo users normally bind to ascii_mode.
+static bool IsCtrlSpacePress(const weasel::KeyEvent& ke) {
+  const UINT release = static_cast<UINT>(ibus::RELEASE_MASK);
+  if (ke.keycode != ibus::space || (ke.mask & release))
+    return false;
+  if (!(ke.mask & static_cast<UINT>(ibus::CONTROL_MASK)))
+    return false;
+  const UINT others = static_cast<UINT>(ibus::SHIFT_MASK) |
+                      static_cast<UINT>(ibus::ALT_MASK) |
+                      static_cast<UINT>(ibus::LOCK_MASK);
+  return (ke.mask & others) == 0;
+}
+
 void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
-  // when _IsKeyboardDisabled don't eat the key,
+  // when _isToOpenClose don't eat the key,
   // when keyboard closable and keyboard closed, don't eat the key
   if ((_isToOpenClose && !_IsKeyboardOpen()) || _IsKeyboardDisabled()) {
     *pfEaten = FALSE;
@@ -27,6 +40,18 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     /* Unknown key event */
     *pfEaten = FALSE;
   } else {
+    /*
+     * Apply the keyboard re-open that the compartment handler could not do from
+     * inside its own notification. Skipped for Ctrl+Space itself so that it can
+     * never interleave with a switch that is still in flight.
+     */
+    if (_fOpenKeyboardPending && !IsCtrlSpacePress(ke)) {
+      _fOpenKeyboardPending = FALSE;
+      // our own write raises a notification; mark it so it is not mistaken
+      // for a new user request
+      _dwSkipAsciiToggleTick = GetTickCount();
+      _SetKeyboardOpen(TRUE);
+    }
     // cheet key code when vertical auto reverse happened, swap up and down
     if (_cand->GetIsReposition()) {
       if (ke.keycode == ibus::Up)
@@ -59,6 +84,13 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
 
     prevfEaten = *pfEaten;
     prevKeyEvent = ke;
+    /*
+     * librime owns this Ctrl+Space and has just switched ascii_mode for it.
+     * Mark it, so the keyboard open/close notification raised for the very same
+     * press does not switch it back.
+     */
+    if (*pfEaten && !_isToOpenClose && IsCtrlSpacePress(ke))
+      _dwSkipAsciiToggleTick = GetTickCount();
   }
 }
 

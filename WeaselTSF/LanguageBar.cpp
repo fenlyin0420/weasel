@@ -152,12 +152,7 @@ STDMETHODIMP CLangBarItemButton::OnClick(TfLBIClick click,
                                          POINT pt,
                                          const RECT* prcArea) {
   if (click == TF_LBI_CLK_LEFT) {
-    _pTextService->_HandleLangBarMenuSelect(
-        ascii_mode ? ID_WEASELTRAY_DISABLE_ASCII : ID_WEASELTRAY_ENABLE_ASCII);
-    ascii_mode = !ascii_mode;
-    if (_pLangBarItemSink) {
-      _pLangBarItemSink->OnUpdate(TF_LBI_STATUS | TF_LBI_ICON);
-    }
+    _pTextService->_ToggleAsciiModeFromLangBar();
   } else if (click == TF_LBI_CLK_RIGHT) {
     /* Open menu */
     HWND hwnd = _pTextService->_GetFocusedContextWindow();
@@ -290,6 +285,15 @@ std::wstring WeaselTSF::_GetRootDir() {
   std::wstring dir{};
   RegGetStringValue(HKEY_LOCAL_MACHINE, GetWeaselRegName(), L"WeaselRoot", dir);
   return dir;
+}
+
+void WeaselTSF::_ToggleAsciiModeFromLangBar() {
+  const bool wasAsciiMode = _status.ascii_mode;
+  _HandleLangBarMenuSelect(wasAsciiMode ? ID_WEASELTRAY_DISABLE_ASCII
+                                        : ID_WEASELTRAY_ENABLE_ASCII);
+  if (!_SyncStatusFromServer())
+    _status.ascii_mode = !wasAsciiMode;
+  _UpdateLanguageBar(_status);
 }
 
 void WeaselTSF::_HandleLangBarMenuSelect(UINT wID) {

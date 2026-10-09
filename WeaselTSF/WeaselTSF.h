@@ -108,6 +108,9 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   HRESULT _SetKeyboardOpen(BOOL fOpen);
   HRESULT _GetCompartmentDWORD(DWORD& value, const GUID guid);
   HRESULT _SetCompartmentDWORD(const DWORD& value, const GUID guid);
+  bool _SyncStatusFromServer();
+  /// reopen the keyboard once we are outside the compartment notification
+  void _RequestKeyboardOpen();
 
   /* Composition */
   void _StartComposition(com_ptr<ITfContext> pContext,
@@ -129,6 +132,7 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   /* Language bar */
   HWND _GetFocusedContextWindow();
   void _HandleLangBarMenuSelect(UINT wID);
+  void _ToggleAsciiModeFromLangBar();
 
   /* IPC */
   bool _EnsureServerConnected();
@@ -212,6 +216,23 @@ class WeaselTSF : public ITfTextInputProcessorEx,
 
   com_ptr<CCompartmentEventSink> _pKeyboardCompartmentSink;
   com_ptr<CCompartmentEventSink> _pConvertionCompartmentSink;
+  /*
+   * Tick of the last ascii_mode switch that has already been carried out for a
+   * Ctrl+Space, so the keyboard open/close notification raised for that same
+   * press does not toggle a second time. Two sources:
+   *  - librime accepted the Ctrl+Space through the user's key_binder binding;
+   *  - we wrote the compartment ourselves to force the keyboard back open.
+   * Hosts such as the Explorer rename box hand the key to the OS even after the
+   * text service ate it, so a single press can produce both.
+   */
+  DWORD _dwSkipAsciiToggleTick = 0;
+  /*
+   * Ctrl+Space closed the keyboard and we want it back open, but
+   * ITfCompartment::SetValue is refused with E_FAIL from inside the compartment's
+   * own change notification. Remember the request and apply it from the key
+   * event path instead, where the write is accepted.
+   */
+  BOOL _fOpenKeyboardPending = FALSE;
 
   com_ptr<ITfComposition> _pComposition;
 

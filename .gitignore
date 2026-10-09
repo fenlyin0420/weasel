@@ -51,6 +51,11 @@ release-notes.html
 *.7z
 RELEASE_CHANGELOG.md
 deps/
+
+# local build shim: the genuine afxres.h ships with the C++ MFC component,
+# which the Visual Studio Community product does not offer
+/include/afxres.h
+
 arm64x_wrapper/*.o
 arm64x_wrapper/*.dll
 arm64x_wrapper/*.ime
