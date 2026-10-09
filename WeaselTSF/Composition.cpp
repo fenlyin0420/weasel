@@ -61,6 +61,9 @@ STDMETHODIMP CStartCompositionEditSession::DoEditSession(TfEditCookie ec) {
 
 void WeaselTSF::_StartComposition(com_ptr<ITfContext> pContext,
                                   BOOL fCUASWorkaroundEnabled) {
+  // A new composition: sample the candidate window anchor afresh, instead of
+  // reusing where the previous one was put.
+  _ForgetCompositionPosition();
   com_ptr<CStartCompositionEditSession> pStartCompositionEditSession;
   pStartCompositionEditSession.Attach(
       new CStartCompositionEditSession(this, pContext, fCUASWorkaroundEnabled));
@@ -158,9 +161,8 @@ class CGetTextExtentEditSession : public CEditSession {
 
 STDMETHODIMP CGetTextExtentEditSession::DoEditSession(TfEditCookie ec) {
   com_ptr<ITfInsertAtSelection> pInsertAtSelection;
-  com_ptr<ITfRange> pRangeComposition;
   ITfRange* pRange;
-  RECT rc;
+  RECT rc = {0};
   BOOL fClipped;
   TF_SELECTION selection;
   ULONG nSelection;
@@ -180,32 +182,41 @@ STDMETHODIMP CGetTextExtentEditSession::DoEditSession(TfEditCookie ec) {
     pRange = selection.range;
   }
 
-  if ((_pContextView->GetTextExt(ec, pRange, &rc, &fClipped)) == S_OK &&
-      (rc.left != 0 || rc.top != 0)) {
+  const HRESULT hrTextExt =
+      _pContextView->GetTextExt(ec, pRange, &rc, &fClipped);
+  /*
+   * An all-zero rectangle is what hosts report when the text is not on
+   * screen (or when they have no caret rect to report at all); it carries no
+   * position either. Hand both cases on as "no caret rect" instead of passing
+   * the rectangle off as a position.
+   */
+  const RECT* pCaretRect =
+      (hrTextExt == S_OK && (rc.left != 0 || rc.top != 0)) ? &rc : nullptr;
+
+  if (pCaretRect != nullptr && _enhancedPosition) {
     // get the foreground window pos and check if rc from GetTextExt is out of
     // window
-    if (_enhancedPosition) {
-      HWND hwnd;
-      RECT rcForegroundWindow;
-      hwnd = GetForegroundWindow();
-      ::GetWindowRect(hwnd, &rcForegroundWindow);
+    HWND hwnd;
+    RECT rcForegroundWindow;
+    hwnd = GetForegroundWindow();
+    ::GetWindowRect(hwnd, &rcForegroundWindow);
 
-      if (rc.left < rcForegroundWindow.left ||
-          rc.left > rcForegroundWindow.right ||
-          rc.top < rcForegroundWindow.top ||
-          rc.top > rcForegroundWindow.bottom) {
-        POINT pt;
-        bool hasCaret = ::GetCaretPos(&pt);
-        int offsetx = rcForegroundWindow.left - rc.left + (hasCaret ? pt.x : 0);
-        int offsety = rcForegroundWindow.top - rc.top + (hasCaret ? pt.y : 0);
-        rc.left += offsetx;
-        rc.right += offsetx;
-        rc.top += offsety;
-        rc.bottom += offsety;
-      }
+    if (rc.left < rcForegroundWindow.left ||
+        rc.left > rcForegroundWindow.right ||
+        rc.top < rcForegroundWindow.top ||
+        rc.top > rcForegroundWindow.bottom) {
+      POINT pt;
+      bool hasCaret = ::GetCaretPos(&pt);
+      int offsetx = rcForegroundWindow.left - rc.left + (hasCaret ? pt.x : 0);
+      int offsety = rcForegroundWindow.top - rc.top + (hasCaret ? pt.y : 0);
+      rc.left += offsetx;
+      rc.right += offsetx;
+      rc.top += offsety;
+      rc.bottom += offsety;
     }
-    _pTextService->_SetCompositionPosition(rc);
   }
+
+  _pTextService->_SetCompositionPosition(_pContextView, pCaretRect);
   return S_OK;
 }
 
@@ -227,21 +238,93 @@ BOOL WeaselTSF::_UpdateCompositionWindow(com_ptr<ITfContext> pContext) {
   return SUCCEEDED(hr);
 }
 
-void WeaselTSF::_SetCompositionPosition(const RECT& rc) {
+void WeaselTSF::_ForgetCompositionPosition() {
+  _fallback_position_valid = false;
+  _caret_position_published = false;
+}
+
+/*
+ * A caret rectangle can only be trusted when some part of it lies inside the
+ * view the text is drawn in. Hosts that never position their IME UI report
+ * placeholders instead, such as a point on the bottom-left corner of their
+ * window (Unity does that when the game does not set
+ * Input.compositionCursorPos) or on a corner of the desktop, which sit fully
+ * outside the view.
+ */
+namespace {
+bool CaretRectOverlapsView(const RECT& rc, const RECT& rcView) {
+  return rc.left < rcView.right && rc.right > rcView.left &&
+         rc.top < rcView.bottom && rc.bottom > rcView.top;
+}
+}  // namespace
+
+RECT WeaselTSF::_CandidateFallbackPosition(const RECT& rcView) {
+  if (!_fallback_position_valid) {
+    POINT pt;
+    if (::GetCursorPos(&pt) && ::PtInRect(&rcView, pt)) {
+      // the user has just clicked into the text box of the game
+      _fallback_position = pt;
+    } else {
+      // no pointer to follow: middle of the view
+      _fallback_position.x = (rcView.left + rcView.right) / 2;
+      _fallback_position.y = (rcView.top + rcView.bottom) / 2;
+    }
+    _fallback_position_valid = true;
+  }
+  const POINT& pt = _fallback_position;
+  // an empty rectangle on the anchor: the window is placed right below it
+  return RECT{pt.x, pt.y, pt.x, pt.y};
+}
+
+void WeaselTSF::_SetCompositionPosition(com_ptr<ITfContextView> pContextView,
+                                        const RECT* pCaretRect) {
+  RECT rcView = {0};
+  const bool has_view = pContextView != nullptr &&
+                        SUCCEEDED(pContextView->GetScreenExt(&rcView)) &&
+                        rcView.right > rcView.left &&
+                        rcView.bottom > rcView.top;
+  if (!has_view) {
+    /*
+     * Without the view rectangle there is no way to tell a real caret rect
+     * from a placeholder one; publish whatever the host reported, as before.
+     */
+    if (pCaretRect != nullptr) {
+      m_client.UpdateInputPosition(*pCaretRect);
+      _cand->UpdateInputPosition(*pCaretRect);
+    }
+    return;
+  }
+
+  const bool caret_rect_usable =
+      pCaretRect != nullptr && CaretRectOverlapsView(*pCaretRect, rcView);
+
   /* Test if rect is valid.
    * If it is invalid during CUAS test, we need to apply CUAS workaround */
   if (!_fCUASWorkaroundTested) {
     _fCUASWorkaroundTested = TRUE;
-    if (rc.top == rc.bottom) {
-      _fCUASWorkaroundEnabled = TRUE;
-      return;
-    }
+    _fCUASWorkaroundEnabled = !caret_rect_usable;
   }
-  RECT _rc;
-  _rc.left = _rc.right = rc.left;
-  _rc.top = _rc.bottom = rc.bottom;
-  m_client.UpdateInputPosition(rc);
-  _cand->UpdateInputPosition(rc);
+
+  if (caret_rect_usable) {
+    _caret_position_published = true;
+    m_client.UpdateInputPosition(*pCaretRect);
+    _cand->UpdateInputPosition(*pCaretRect);
+    return;
+  }
+
+  if (_caret_position_published) {
+    /*
+     * The host has no caret rect to give at the moment, but the candidate
+     * window already sits where a trustworthy one had put it: leave it there.
+     * Apps that do have a caret report no layout for a moment now and then
+     * (Word while scrolling, for instance).
+     */
+    return;
+  }
+
+  const RECT fallback = _CandidateFallbackPosition(rcView);
+  m_client.UpdateInputPosition(fallback);
+  _cand->UpdateInputPosition(fallback);
 }
 
 /* Inline Preedit */

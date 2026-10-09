@@ -124,7 +124,11 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   BOOL _IsComposing();
   BOOL _IsCurrentComposition(ITfComposition* pComposition);
   void _SetComposition(com_ptr<ITfComposition> pComposition);
-  void _SetCompositionPosition(const RECT& rc);
+  void _SetCompositionPosition(com_ptr<ITfContextView> pContextView,
+                               const RECT* pCaretRect);
+  /* Forget where the candidate window was placed; called when a new composing
+   * session starts, so the fallback anchor is sampled afresh. */
+  void _ForgetCompositionPosition();
   BOOL _UpdateCompositionWindow(com_ptr<ITfContext> pContext);
   void _FinalizeComposition();
   void _AbortComposition(bool clear = true);
@@ -244,6 +248,21 @@ class WeaselTSF : public ITfTextInputProcessorEx,
 
   /* CUAS Candidate Window Position Workaround */
   BOOL _fCUASWorkaroundTested, _fCUASWorkaroundEnabled;
+
+  /*
+   * Hosts that never position their IME UI (games, notably) report a caret
+   * rectangle with no relation to the actual caret - Unity leaves the
+   * composition window at the bottom-left corner of its window, for instance.
+   * Follow the mouse cursor instead: it still sits where the user clicked into
+   * the text box. The anchor is sampled once per composing session, so the
+   * candidate window does not chase the pointer while typing.
+   */
+  RECT _CandidateFallbackPosition(const RECT& rcView);
+  bool _fallback_position_valid = false;
+  POINT _fallback_position = {0, 0};
+  /* Whether a caret rect that could be trusted has been published for the
+   * current composing session. */
+  bool _caret_position_published = false;
 
   /* Weasel Related */
   weasel::Client m_client;
