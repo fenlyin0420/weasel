@@ -68,6 +68,20 @@ void WeaselTSF::_StartComposition(com_ptr<ITfContext> pContext,
   pStartCompositionEditSession.Attach(
       new CStartCompositionEditSession(this, pContext, fCUASWorkaroundEnabled));
   _cand->StartUI();
+  /*
+   * Ask for the caret position before the TSF composition is created. Hosts
+   * that cannot report the bounds of a young composition - Chromium has to
+   * wait for its renderer to acknowledge the composition, and answers
+   * TS_E_NOLAYOUT until then - can report the position of the plain caret
+   * right away. Asking first keeps the first keystroke of a session off the
+   * mouse-cursor fallback; on hosts that never report anything usable this
+   * probe fails like all the later ones and the fallback still applies.
+   * The panel window exists from StartUI(), so the position has somewhere to
+   * land.
+   */
+  if (_pComposition == nullptr) {
+    _UpdateCompositionWindow(pContext);
+  }
   if (pStartCompositionEditSession != nullptr) {
     HRESULT hr;
     pContext->RequestEditSession(_tfClientId, pStartCompositionEditSession,
@@ -136,6 +150,65 @@ void WeaselTSF::_EndComposition(com_ptr<ITfContext> pContext,
   }
 }
 
+/*
+ * A caret rectangle can only be trusted when some part of it lies inside the
+ * view the text is drawn in. Hosts that never position their IME UI report
+ * placeholders instead, such as a point on the bottom-left corner of their
+ * window (Unity does that when the game does not set
+ * Input.compositionCursorPos) or on a corner of the desktop, which sit fully
+ * outside the view.
+ */
+namespace {
+bool CaretRectOverlapsView(const RECT& rc, const RECT& rcView) {
+  return rc.left < rcView.right && rc.right > rcView.left &&
+         rc.top < rcView.bottom && rc.bottom > rcView.top;
+}
+
+/*
+ * The rectangle the caret is expected to lie in, in screen coordinates: the
+ * client area of the window the text is drawn in. Chromium and CEF hosts
+ * answer GetScreenExt with the layout bounds of the focused text control,
+ * which still describe the previous control right after the user clicks into
+ * a new one - while the caret rectangle already describes the new one, so the
+ * bounds test used to reject perfectly good caret rectangles. The client
+ * rectangle of the same view does not lag behind focus changes, and a real
+ * caret is strictly inside it.
+ */
+bool GetViewClientRectInScreen(com_ptr<ITfContextView> pContextView, RECT& rc) {
+  HWND hwnd = nullptr;
+  RECT client = {0};
+  if (pContextView == nullptr || FAILED(pContextView->GetWnd(&hwnd)) ||
+      hwnd == nullptr || !::GetClientRect(hwnd, &client) ||
+      client.right <= client.left || client.bottom <= client.top)
+    return false;
+  POINT points[2] = {{client.left, client.top}, {client.right, client.bottom}};
+  ::MapWindowPoints(hwnd, NULL, points, 2);
+  rc = {points[0].x, points[0].y, points[1].x, points[1].y};
+  return true;
+}
+
+/*
+ * The caret the window itself keeps, in screen coordinates. Hosts that never
+ * answer GetTextExt (a game that hands its text field to the system through
+ * IMM32 leaves the TSF context with nothing to report) usually still own a
+ * caret on this thread, and that is the position they expect the candidate
+ * window at.
+ */
+bool GetSystemCaretRectInScreen(RECT& rc) {
+  GUITHREADINFO info = {0};
+  info.cbSize = sizeof(info);
+  if (!::GetGUIThreadInfo(::GetCurrentThreadId(), &info) ||
+      info.hwndCaret == nullptr ||
+      info.rcCaret.right <= info.rcCaret.left ||
+      info.rcCaret.bottom <= info.rcCaret.top)
+    return false;
+  POINT points[2] = {{info.rcCaret.left, info.rcCaret.top},
+                     {info.rcCaret.right, info.rcCaret.bottom}};
+  ::MapWindowPoints(info.hwndCaret, NULL, points, 2);
+  rc = {points[0].x, points[0].y, points[1].x, points[1].y};
+  return true;
+}
+}  // namespace
 /* Get Text Extent */
 class CGetTextExtentEditSession : public CEditSession {
  public:
@@ -193,6 +266,21 @@ STDMETHODIMP CGetTextExtentEditSession::DoEditSession(TfEditCookie ec) {
   const RECT* pCaretRect =
       (hrTextExt == S_OK && (rc.left != 0 || rc.top != 0)) ? &rc : nullptr;
 
+  /*
+   * No caret from the text store: a host that keeps the text in its own hands
+   * (games, notably) may still own a caret on this thread, which is where it
+   * expects IME UI. Trust it only when it lands inside the view - a caret left
+   * over from some other window would otherwise drag the panel along.
+   */
+  if (pCaretRect == nullptr) {
+    RECT rcClient = {0};
+    if (GetSystemCaretRectInScreen(rc) &&
+        (!GetViewClientRectInScreen(_pContextView, rcClient) ||
+         CaretRectOverlapsView(rc, rcClient))) {
+      pCaretRect = &rc;
+    }
+  }
+
   if (pCaretRect != nullptr && _enhancedPosition) {
     // get the foreground window pos and check if rc from GetTextExt is out of
     // window
@@ -241,22 +329,9 @@ BOOL WeaselTSF::_UpdateCompositionWindow(com_ptr<ITfContext> pContext) {
 void WeaselTSF::_ForgetCompositionPosition() {
   _fallback_position_valid = false;
   _caret_position_published = false;
+  _cand->SetImmCaretProbe(false);
 }
 
-/*
- * A caret rectangle can only be trusted when some part of it lies inside the
- * view the text is drawn in. Hosts that never position their IME UI report
- * placeholders instead, such as a point on the bottom-left corner of their
- * window (Unity does that when the game does not set
- * Input.compositionCursorPos) or on a corner of the desktop, which sit fully
- * outside the view.
- */
-namespace {
-bool CaretRectOverlapsView(const RECT& rc, const RECT& rcView) {
-  return rc.left < rcView.right && rc.right > rcView.left &&
-         rc.top < rcView.bottom && rc.bottom > rcView.top;
-}
-}  // namespace
 
 RECT WeaselTSF::_CandidateFallbackPosition(const RECT& rcView) {
   if (!_fallback_position_valid) {
@@ -279,10 +354,15 @@ RECT WeaselTSF::_CandidateFallbackPosition(const RECT& rcView) {
 void WeaselTSF::_SetCompositionPosition(com_ptr<ITfContextView> pContextView,
                                         const RECT* pCaretRect) {
   RECT rcView = {0};
-  const bool has_view = pContextView != nullptr &&
-                        SUCCEEDED(pContextView->GetScreenExt(&rcView)) &&
-                        rcView.right > rcView.left &&
-                        rcView.bottom > rcView.top;
+  RECT rcExt = {0};
+  const bool has_ext =
+      pContextView != nullptr &&
+      SUCCEEDED(pContextView->GetScreenExt(&rcExt)) &&
+      rcExt.right > rcExt.left && rcExt.bottom > rcExt.top;
+  const bool has_client = GetViewClientRectInScreen(pContextView, rcView);
+  if (!has_client && has_ext)
+    rcView = rcExt;
+  const bool has_view = has_client || has_ext;
   if (!has_view) {
     /*
      * Without the view rectangle there is no way to tell a real caret rect
@@ -307,6 +387,7 @@ void WeaselTSF::_SetCompositionPosition(com_ptr<ITfContextView> pContextView,
 
   if (caret_rect_usable) {
     _caret_position_published = true;
+    _cand->SetImmCaretProbe(false);
     m_client.UpdateInputPosition(*pCaretRect);
     _cand->UpdateInputPosition(*pCaretRect);
     return;
@@ -322,7 +403,31 @@ void WeaselTSF::_SetCompositionPosition(com_ptr<ITfContextView> pContextView,
     return;
   }
 
+  /*
+   * Hosts that keep their text outside the TSF document (a game that sets an
+   * IMM32 composition area, for instance) still point at the text field
+   * through GetScreenExt even when GetTextExt has no caret to give. Anchor at
+   * that area rather than at the mouse, which has usually wandered off since
+   * the user clicked; a rectangle covering the whole view is not an area.
+   * Evaluated on every probe, so a host that keeps the area up to date with
+   * its caret drags the window along.
+   */
+  if (has_ext && rcExt.left > rcView.left && rcExt.top > rcView.top &&
+      rcExt.right < rcView.right && rcExt.bottom < rcView.bottom) {
+    /*
+     * The host tells us where its text field is but not where the caret in it
+     * is; let the panel ask the host's own IMM32 composition window, which is
+     * where such a host keeps the caret.
+     */
+    _cand->SetImmCaretProbe(true);
+    const RECT anchor = {rcExt.left, rcExt.bottom, rcExt.left, rcExt.bottom};
+    m_client.UpdateInputPosition(anchor);
+    _cand->UpdateInputPosition(anchor);
+    return;
+  }
+
   const RECT fallback = _CandidateFallbackPosition(rcView);
+  _cand->SetImmCaretProbe(true);
   m_client.UpdateInputPosition(fallback);
   _cand->UpdateInputPosition(fallback);
 }

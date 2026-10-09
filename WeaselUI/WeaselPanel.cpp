@@ -4,10 +4,13 @@
 #include "VHorizontalLayout.h"
 #include "VerticalLayout.h"
 #include <filesystem>
+#include <imm.h>
 #include <memory>
 #include <resource.h>
 #include <windowsx.h>
 #include <wrl/client.h>
+
+#pragma comment(lib, "imm32.lib")
 
 namespace fs = std::filesystem;
 
@@ -82,6 +85,7 @@ WeaselPanel::WeaselPanel(UI& ui)
       m_pD2D(nullptr),
       m_status(ui.status()),
       m_in_server(ui.InServer()),
+      m_imm_caret_probe(ui.ImmCaretProbe()),
       m_style(ui.style()),
       m_uiCallback(ui.uiCallback()),
       m_ostyle(ui.ostyle()),
@@ -126,6 +130,10 @@ void WeaselPanel::_ClearTimers() {
     ::KillTimer(m_hWnd, AUTOHIDE_TIMER);
     m_autoHideTimer = 0;
   }
+  if (m_caretTimer) {
+    ::KillTimer(m_hWnd, CARET_TIMER);
+    m_caretTimer = 0;
+  }
 }
 
 void WeaselPanel::ShowWithTimeout(size_t millisec) {
@@ -147,6 +155,16 @@ bool WeaselPanel::IsCountingDown() const {
 
 void WeaselPanel::ShowWindow(int nCmdShow) {
   ::ShowWindow(m_hWnd, nCmdShow);
+  if (nCmdShow == SW_HIDE) {
+    if (m_caretTimer) {
+      ::KillTimer(m_hWnd, CARET_TIMER);
+      m_caretTimer = 0;
+    }
+    m_imm_caret_active = false;
+  } else if (m_caretTimer == 0) {
+    // low rate: the caret moves with the host's own text, one tick behind it
+    m_caretTimer = ::SetTimer(m_hWnd, CARET_TIMER, 40, nullptr);
+  }
   if (m_pD2D) {
     if (nCmdShow != SW_HIDE) {
       // ensure window resources exist when showing
@@ -157,6 +175,38 @@ void WeaselPanel::ShowWindow(int nCmdShow) {
       }
     }
   }
+}
+
+void WeaselPanel::OnCaretTimer() {
+  if (!m_hWnd || !m_imm_caret_probe)
+    return;
+  /*
+   * The host positions its IME UI through IMM32 (that is what an IMM32 input
+   * method follows there); reading it from this window's timer keeps the call
+   * out of any TSF callback, so the host sees it as an ordinary IMM32 call.
+   */
+  const HWND owner = ::GetWindow(m_hWnd, GW_OWNER);
+  if (owner == nullptr)
+    return;
+  HIMC imc = ::ImmGetContext(owner);
+  if (imc == nullptr)
+    return;
+  COMPOSITIONFORM form = {0};
+  const BOOL ok = ::ImmGetCompositionWindow(imc, &form);
+  ::ImmReleaseContext(owner, imc);
+  if (!ok || (form.dwStyle & CFS_POINT) == 0) {
+    m_imm_caret_active = false;
+    return;
+  }
+  POINT point = form.ptCurrentPos;
+  ::MapWindowPoints(owner, NULL, &point, 1);
+  if (m_imm_caret_active && point.x == m_imm_caret_point.x &&
+      point.y == m_imm_caret_point.y)
+    return;
+  m_imm_caret_point = point;
+  m_imm_caret_active = true;
+  m_inputPos = RECT{point.x, point.y, point.x, point.y};
+  _Reposition(true);
 }
 
 void WeaselPanel::DestroyWindow() {
@@ -187,6 +237,8 @@ void WeaselPanel::ReleaseAllResources() {
 void WeaselPanel::MoveTo(RECT rc) {
   if (!m_hWnd || !m_layout)
     return;
+  if (m_imm_caret_active)
+    return;  // the host's own caret is the better anchor while it is available
   m_redraw_by_monitor_change = false;
   bool should_reset_sticky =
       (m_ctx.empty() || (abs(rc.left - m_inputPos.left) > 50) ||
@@ -914,6 +966,8 @@ void WeaselPanel::OnDestroy() {
   m_sticky = false;
   m_lastWindowPos = {-1, -1};
   m_hasLastWindowPos = false;
+  m_imm_caret_active = false;
+  m_imm_caret_point = {-1, -1};
 }
 
 HRESULT WeaselPanel::OnScroll(UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -1158,6 +1212,9 @@ LRESULT WeaselPanel::MsgHandler(HWND hwnd,
         m_autoHideTimer = 0;
         // hide the panel on auto-hide
         ShowWindow(SW_HIDE);
+        return 0;
+      } else if (wParam == CARET_TIMER) {
+        OnCaretTimer();
         return 0;
       }
   }

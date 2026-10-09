@@ -222,6 +222,11 @@ void CCandidateList::UpdateStyle(const UIStyle& sty) {
   _ui->style() = sty;
 }
 
+void CCandidateList::SetImmCaretProbe(bool on) {
+  if (_ui)
+    _ui->ImmCaretProbe() = on;
+}
+
 void CCandidateList::UpdateInputPosition(RECT const& rc) {
   _ui->UpdateInputPosition(rc);
 }

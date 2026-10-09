@@ -21,6 +21,10 @@ class WeaselPanel {
   }
   void MoveTo(RECT rc);
   void Refresh();
+  /* Poll the host's IMM32 composition window for the caret (see the comment on
+   * UI::ImmCaretProbe); runs on this window's timer, never inside a TSF
+   * callback, so the host sees an ordinary IMM32 call like its own. */
+  void OnCaretTimer();
 
   BOOL IsWindow() const;
   void ShowWindow(int nCmdShow);
@@ -32,6 +36,7 @@ class WeaselPanel {
 
   static const int AUTOREV_TIMER = 20241209;
   static const int AUTOHIDE_TIMER = 20241107;
+  static const int CARET_TIMER = 20241010;
 
   HWND hwnd() const;
 
@@ -89,6 +94,9 @@ class WeaselPanel {
   Context& m_octx;
   Status& m_status;
   const bool& m_in_server;
+  /* Whether the host reports no caret and the IMM32 composition window should
+   * be asked for one (owned by the UI object, set by the TSF side). */
+  const bool& m_imm_caret_probe;
   UIStyle& m_style;
   UIStyle& m_ostyle;
 
@@ -123,6 +131,11 @@ class WeaselPanel {
   HWND m_hWnd;
   UINT_PTR m_clickTimer = 0;
   UINT_PTR m_autoHideTimer = 0;
+  UINT_PTR m_caretTimer = 0;
+  /* Set once the host's own caret has been read: it is then the anchor, and
+   * positions pushed from the TSF side are ignored. */
+  bool m_imm_caret_active = false;
+  POINT m_imm_caret_point = {-1, -1};
 
  public:
   void ShowWithTimeout(size_t millisec);

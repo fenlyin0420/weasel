@@ -48,6 +48,8 @@ class CCandidateList : public ITfIntegratableCandidateListUIElement,
 
   /* Update */
   void UpdateUI(const weasel::Context& ctx, const weasel::Status& status);
+  /* Host has no caret to report through TSF: let the panel probe IMM32. */
+  void SetImmCaretProbe(bool on);
   void UpdateStyle(const weasel::UIStyle& sty);
   void UpdateInputPosition(RECT const& rc);
   void Destroy();

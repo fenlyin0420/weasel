@@ -54,6 +54,14 @@ class UI {
   void SetCallback(const UICallbackFunc& func) { _uiCallback = func; }
   bool& InServer() { return in_server_; }
   HWND hwnd();
+  /*
+   * Set while the host reports no caret of its own through TSF. The panel then
+   * asks the host's IMM32 composition window for the caret instead - the only
+   * place a host that keeps its text out of the TSF document publishes it, and
+   * where an IMM32 input method reads it from. Hosts that do report a caret
+   * never set this, so their windows never see an input context created.
+   */
+  bool& ImmCaretProbe() { return imm_caret_probe_; }
 
  private:
   the<UIImpl> pimpl_;
@@ -63,6 +71,7 @@ class UI {
   UIStyle style_;
   UIStyle ostyle_;
   bool in_server_;
+  bool imm_caret_probe_ = false;
   UICallbackFunc _uiCallback;
 };
 }  // namespace weasel
