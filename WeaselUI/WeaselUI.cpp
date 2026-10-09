@@ -39,35 +39,23 @@ UINT_PTR UIImpl::timer = 0;
 void UIImpl::Show() {
   if (!panel.IsWindow())
     return;
-  /*
-   * Every candidate update asks for the window to be shown again, and the
-   * answer is already on screen. Showing a topmost, browser-owned popup costs
-   * a visibility round through the owning window's chain (tens of milliseconds
-   * under a Chromium host), so keep the call for the transitions only.
-   */
-  const bool already_shown = shown && panel.IsWindowVisible();
+  panel.ShowWindow(SW_SHOWNA);
   shown = true;
   if (timer) {
     KillTimer(panel.m_hWnd, AUTOHIDE_TIMER);
     timer = 0;
   }
-  if (already_shown)
-    return;
-  panel.ShowWindow(SW_SHOWNA);
 }
 
 void UIImpl::Hide() {
   if (!panel.IsWindow())
     return;
-  const bool already_hidden = !shown && !panel.IsWindowVisible();
+  panel.ShowWindow(SW_HIDE);
   shown = false;
   if (timer) {
     KillTimer(panel.m_hWnd, AUTOHIDE_TIMER);
     timer = 0;
   }
-  if (already_hidden)
-    return;
-  panel.ShowWindow(SW_HIDE);
 }
 
 void UIImpl::ShowWithTimeout(size_t millisec) {
