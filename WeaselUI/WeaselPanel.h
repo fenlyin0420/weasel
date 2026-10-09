@@ -113,6 +113,11 @@ class WeaselPanel
   const bool& m_in_server;
 
   CRect m_inputPos;
+  /* Last position handed to SetWindowPos. Moving a topmost, browser-owned
+   * popup is a surprisingly expensive operation in Chromium hosts, and the
+   * position usually repeats on every keystroke, so only move on a change. */
+  CPoint m_lastWindowPos = {-1, -1};
+  bool m_hasLastWindowPos = false;
   int m_offsetys[MAX_CANDIDATES_COUNT];  // offset y for candidates when
                                          // vertical layout over bottom
   int m_offsety_preedit;
